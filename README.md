@@ -8,13 +8,16 @@ Fully local macOS pipeline that automatically transcribes iPhone Voice Memos usi
 ├── transcribe_hviske.py
 ├── watch_and_transcribe.sh
 ├── install.sh
+├── dashboard.py        (web dashboard)
+├── status.py           (progress tracking)
 ├── launchd/
-├── inbox/          (iCloud Drive watch folder)
-├── transcripts/    (.txt, .json, .srt output)
-├── done/           (processed audio)
+├── inbox/              (iCloud Drive watch folder)
+├── transcripts/        (.txt, .json, .srt output)
+├── done/               (processed audio)
 ├── failed/
 ├── logs/
 ├── tmp/
+├── status.json         (live pipeline state)
 └── venv/
 ```
 
@@ -178,6 +181,19 @@ Output:
 ```
 
 Basename conflicts get `-2`, `-3`, ... suffixes.
+
+## Dashboard
+
+A web dashboard shows live pipeline status, queue, processing progress, history, and logs.
+
+```bash
+~/LocalMemoTranscriber/venv/bin/python ~/LocalMemoTranscriber/dashboard.py \
+  --config ~/LocalMemoTranscriber/config.env
+```
+
+Opens at `http://127.0.0.1:9888` by default. Use `--port` to change the port, or `--no-open` to skip opening the browser.
+
+The dashboard reads from `status.json` (written by the watcher and transcriber) and scans the inbox, done, and failed directories. It auto-refreshes every 2 seconds with zero external dependencies.
 
 ## Logs
 

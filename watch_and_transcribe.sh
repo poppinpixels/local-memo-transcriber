@@ -52,10 +52,19 @@ VENV_DIR="${VENV_DIR_OVERRIDE:-$VENV_DIR}"
 POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS_OVERRIDE:-${POLL_INTERVAL_SECONDS:-300}}"
 STABILITY_WAIT_SECONDS="${STABILITY_WAIT_SECONDS_OVERRIDE:-${STABILITY_WAIT_SECONDS:-15}}"
 PYTHON_BIN="${PYTHON_BIN_OVERRIDE:-${PYTHON_BIN:-}}"
+STATUS_FILE="${STATUS_FILE_OVERRIDE:-${STATUS_FILE:-}}"
 
 if [[ -z "$PYTHON_BIN" ]]; then
   PYTHON_BIN="$VENV_DIR/bin/python"
 fi
+
+STATUS_SCRIPT="$SCRIPT_DIR/status.py"
+
+update_status() {
+  if [[ -n "$STATUS_FILE" && -f "$STATUS_SCRIPT" ]]; then
+    "$PYTHON_BIN" "$STATUS_SCRIPT" "$STATUS_FILE" "$@" 2>/dev/null || true
+  fi
+}
 
 mkdir -p "$WATCH_DIR" "$TRANSCRIPTS_DIR" "$DONE_DIR" "$FAILED_DIR" "$LOG_DIR" "$TMP_DIR"
 
@@ -72,6 +81,7 @@ log_error() {
 }
 
 cleanup() {
+  update_status watcher --state stopped
   rm -f "$LOCK_DIR/pid" >/dev/null 2>&1 || true
   rmdir "$LOCK_DIR" >/dev/null 2>&1 || true
 }
@@ -123,7 +133,19 @@ is_stable_file() {
   [[ "$before" == "$after" ]]
 }
 
+count_queue_files() {
+  local count=0
+  while IFS= read -r -d '' f; do
+    if is_supported_audio "$f"; then
+      count=$((count + 1))
+    fi
+  done < <(find "$WATCH_DIR" -maxdepth 1 -type f -not -name '.*' -print0 2>/dev/null)
+  printf '%d' "$count"
+}
+
 process_available_files() {
+  update_status watcher --state scanning --files-in-queue "$(count_queue_files)"
+
   while IFS= read -r -d '' file; do
     if ! is_supported_audio "$file"; then
       continue
@@ -134,6 +156,7 @@ process_available_files() {
       continue
     fi
 
+    update_status watcher --state processing
     log "Processing: $file"
     if "$PYTHON_BIN" "$SCRIPT_DIR/transcribe_hviske.py" --config "$CONFIG_FILE" --input "$file"; then
       log "Completed: $file"
@@ -156,6 +179,7 @@ fi
 trap cleanup EXIT INT TERM
 printf '%s\n' "$$" > "$LOCK_DIR/pid"
 log "Watcher started with config: $CONFIG_FILE"
+update_status watcher --state started --pid "$$" --poll-interval "$POLL_INTERVAL_SECONDS"
 
 while true; do
   process_available_files
@@ -165,5 +189,8 @@ while true; do
     break
   fi
 
+  NEXT_POLL="$(date -v "+${POLL_INTERVAL_SECONDS}S" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || date -d "+${POLL_INTERVAL_SECONDS} seconds" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo "")"
+  update_status watcher --state sleeping --next-poll-at "$NEXT_POLL" --files-in-queue "$(count_queue_files)"
+  update_status pipeline-idle
   sleep "$POLL_INTERVAL_SECONDS"
 done

@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import unicodedata
 import wave
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from status import StatusTracker
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
@@ -46,6 +49,7 @@ class Config:
     device_preference: str
     silence_threshold_db: str
     min_silence_duration: float
+    status_file: Path | None = None
 
     @property
     def runtime_log(self) -> Path:
@@ -54,6 +58,11 @@ class Config:
     @property
     def error_log(self) -> Path:
         return self.log_dir / "error.log"
+
+    def tracker(self) -> StatusTracker | None:
+        if self.status_file:
+            return StatusTracker(self.status_file)
+        return None
 
 
 @dataclass
@@ -131,6 +140,9 @@ def load_config(config_path: Path) -> Config:
         if item.strip()
     )
 
+    status_raw = get("STATUS_FILE", "")
+    status_file = Path(status_raw).expanduser().resolve() if status_raw else None
+
     return Config(
         model_id=get("MODEL_ID", "openai/whisper-large-v3"),
         watch_dir=path_value("WATCH_DIR", str(Path.home() / "LocalMemoTranscriber" / "inbox")),
@@ -151,6 +163,7 @@ def load_config(config_path: Path) -> Config:
         device_preference=get("DEVICE_PREFERENCE", "auto").lower(),
         silence_threshold_db=get("SILENCE_THRESHOLD_DB", "-35dB"),
         min_silence_duration=get_float("MIN_SILENCE_DURATION", 0.3),
+        status_file=status_file,
     )
 
 
@@ -584,7 +597,7 @@ def generate_whisper_chunk_text(
     raise PipelineError("Direct Whisper generation returned empty output")
 
 
-def transcribe_audio(loaded: LoadedPipeline, audio_path: Path, config: Config, duration_seconds: float, *, silence_points: list[float] | None = None) -> dict[str, Any]:
+def transcribe_audio(loaded: LoadedPipeline, audio_path: Path, config: Config, duration_seconds: float, *, silence_points: list[float] | None = None, tracker: StatusTracker | None = None) -> dict[str, Any]:
     if loaded.model_type != "whisper":
         raise PipelineError(
             f"Model {config.model_id} is model_type={loaded.model_type or 'unknown'}, but this pipeline now uses direct Whisper generation."
@@ -607,7 +620,13 @@ def transcribe_audio(loaded: LoadedPipeline, audio_path: Path, config: Config, d
     chunk_summaries: list[dict[str, Any]] = []
     current_loaded = loaded
 
-    for start_sample, end_sample in chunk_ranges:
+    for chunk_idx, (start_sample, end_sample) in enumerate(chunk_ranges):
+        if tracker:
+            tracker.update_pipeline(
+                state="transcribing",
+                chunk_index=chunk_idx + 1,
+                chunk_total=len(chunk_ranges),
+            )
         chunk_audio = waveform[start_sample:end_sample]
         chunk_start_seconds = start_sample / sample_rate
         chunk_end_seconds = end_sample / sample_rate
@@ -889,6 +908,7 @@ def process_file(input_path: Path, config: Config) -> int:
     shutil.which(config.ffmpeg_bin) or (_ for _ in ()).throw(FileNotFoundError(f"ffmpeg not found: {config.ffmpeg_bin}"))
     shutil.which(config.ffprobe_bin) or (_ for _ in ()).throw(FileNotFoundError(f"ffprobe not found: {config.ffprobe_bin}"))
 
+    tracker = config.tracker()
     basename = resolve_unique_basename(input_path, config)
     source_original_name = input_path.name
     working_audio = config.tmp_dir / f"{basename}{input_path.suffix.lower()}"
@@ -896,27 +916,47 @@ def process_file(input_path: Path, config: Config) -> int:
     expected_done_audio = config.done_dir / working_audio.name
     failed_target: Path | None = None
     written_output_paths: list[Path] = []
+    t_start = time.monotonic()
 
     log_info(config, f"Starting transcription for {input_path}")
 
     try:
+        if tracker:
+            tracker.update_pipeline(
+                state="moving",
+                file=working_audio.name,
+                original_name=source_original_name,
+                basename=basename,
+                model_id=config.model_id,
+            )
         _safe_move(input_path, working_audio)
+
+        if tracker:
+            tracker.update_pipeline(state="normalizing")
         normalize_audio(working_audio, normalized_audio, config)
         duration_seconds = probe_duration_seconds(normalized_audio, config)
+        if tracker:
+            tracker.update_pipeline(state="detecting_silence", duration_seconds=duration_seconds)
         silence_points = detect_silence_points(normalized_audio, config)
         log_info(config, f"Detected {len(silence_points)} silence points in {duration_seconds:.1f}s audio")
 
+        if tracker:
+            tracker.update_pipeline(state="loading_model")
         loaded = load_pipeline(config)
         log_info(
             config,
             f"Loaded model {config.model_id} on device={loaded.device_name} dtype={loaded.dtype_name}; transcribing {working_audio.name}",
         )
-        result = transcribe_audio(loaded, normalized_audio, config, duration_seconds, silence_points=silence_points)
+        if tracker:
+            tracker.update_pipeline(state="transcribing", device=loaded.device_name)
+        result = transcribe_audio(loaded, normalized_audio, config, duration_seconds, silence_points=silence_points, tracker=tracker)
         transcript_text = str(result.get("text", "")).strip()
 
         if not is_usable_transcript(transcript_text):
             raise PipelineError("Transcription returned unusable text after all attempts")
 
+        if tracker:
+            tracker.update_pipeline(state="writing_output")
         segments = normalize_segments(result.get("chunks"), transcript_text, duration_seconds)
         outputs = write_output_files(
             basename=basename,
@@ -930,22 +970,34 @@ def process_file(input_path: Path, config: Config) -> int:
             config=config,
         )
         written_output_paths = list(outputs.values())
+
+        if tracker:
+            tracker.update_pipeline(state="archiving")
         done_audio = move_to_directory(working_audio, config.done_dir)
         log_info(config, f"Finished transcription for {done_audio.name}; outputs: {json_safe(outputs)}")
+
+        if tracker:
+            tracker.pipeline_done(
+                original_name=source_original_name,
+                basename=basename,
+                duration_seconds=duration_seconds,
+                processing_seconds=time.monotonic() - t_start,
+            )
         return 0
     except Exception as exc:
         cleanup_output_files(written_output_paths)
-        # Only move to failed/ if the working copy has real content (not a
-        # 0-byte stub left behind by a failed iCloud copy).
         if working_audio.exists() and working_audio.stat().st_size > 0:
             failed_target = move_to_directory(working_audio, config.failed_dir)
         elif working_audio.exists():
-            working_audio.unlink(missing_ok=True)  # discard empty stub
+            working_audio.unlink(missing_ok=True)
 
         failure_note = f"Transcription failed for {input_path}: {exc}"
         if failed_target is not None:
             failure_note += f" | moved to {failed_target}"
         log_error(config, failure_note)
+
+        if tracker:
+            tracker.pipeline_failed(original_name=source_original_name, error=str(exc))
         return 1
     finally:
         normalized_audio.unlink(missing_ok=True)

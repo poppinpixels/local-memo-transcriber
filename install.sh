@@ -172,7 +172,7 @@ else
   log "Skipping pip install because SKIP_PIP_INSTALL=1"
 fi
 
-chmod +x "$WATCH_SCRIPT" "$TRANSCRIBER_SCRIPT" "$SCRIPT_DIR/install.sh"
+chmod +x "$WATCH_SCRIPT" "$TRANSCRIBER_SCRIPT" "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/dashboard.py"
 
 if [[ ! -f "$PLIST_TEMPLATE" ]]; then
   echo "launchd template missing: $PLIST_TEMPLATE" >&2
@@ -215,6 +215,8 @@ else
   log "Skipping launchd load because SKIP_LAUNCHD=1"
 fi
 
+DASHBOARD_PORT="${DASHBOARD_PORT:-9888}"
+
 cat <<EOF
 Install complete.
 
@@ -227,6 +229,9 @@ Failed:            $FAILED_DIR
 Logs:              $LOG_DIR
 Venv:              $VENV_DIR
 launchd plist:     $PLIST_DEST
+
+Dashboard:
+  $VENV_PYTHON $SCRIPT_DIR/dashboard.py --config $CONFIG_DEST --port $DASHBOARD_PORT
 
 Manual checks:
   tail -f "$LOG_DIR/runtime.log"
