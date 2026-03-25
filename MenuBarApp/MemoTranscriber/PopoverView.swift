@@ -210,11 +210,11 @@ struct PopoverView: View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 actionButton("Inbox", icon: "tray.and.arrow.down") {
-                    openFolder("inbox")
+                    openPath(monitor.inboxPath)
                 }
                 Divider().frame(height: 28)
                 actionButton("Transcripts", icon: "doc.text") {
-                    openFolder("transcripts")
+                    openPath(monitor.transcriptsPath)
                 }
             }
 
@@ -254,9 +254,7 @@ struct PopoverView: View {
 
     // MARK: - Helpers
 
-    private func openFolder(_ name: String) {
-        let path = (NSHomeDirectory() as NSString)
-            .appendingPathComponent("LocalMemoTranscriber/\(name)")
+    private func openPath(_ path: String) {
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 

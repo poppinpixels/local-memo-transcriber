@@ -94,6 +94,8 @@ final class StatusMonitor: ObservableObject {
 
     private var timer: Timer?
     private let statusFilePath: String
+    private(set) var inboxPath: String
+    private(set) var transcriptsPath: String
 
     var menuBarIcon: String {
         if pipeline.isProcessing {
@@ -109,6 +111,8 @@ final class StatusMonitor: ObservableObject {
         let home = NSHomeDirectory()
         let configPath = (home as NSString).appendingPathComponent("LocalMemoTranscriber/config.env")
         var statusPath = (home as NSString).appendingPathComponent("LocalMemoTranscriber/status.json")
+        var inbox = (home as NSString).appendingPathComponent("LocalMemoTranscriber/inbox")
+        var transcripts = (home as NSString).appendingPathComponent("LocalMemoTranscriber/transcripts")
 
         if let contents = try? String(contentsOfFile: configPath, encoding: .utf8) {
             configFound = true
@@ -118,16 +122,24 @@ final class StatusMonitor: ObservableObject {
                 let cleaned = trimmed.hasPrefix("export ")
                     ? String(trimmed.dropFirst(7)).trimmingCharacters(in: .whitespaces)
                     : trimmed
-                if cleaned.hasPrefix("STATUS_FILE=") {
-                    var value = String(cleaned.dropFirst("STATUS_FILE=".count))
+
+                func extractValue(_ prefix: String) -> String? {
+                    guard cleaned.hasPrefix(prefix) else { return nil }
+                    var value = String(cleaned.dropFirst(prefix.count))
                     value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
                     value = value.replacingOccurrences(of: "$HOME", with: home)
-                    statusPath = (value as NSString).expandingTildeInPath
+                    return (value as NSString).expandingTildeInPath
                 }
+
+                if let v = extractValue("STATUS_FILE=") { statusPath = v }
+                if let v = extractValue("WATCH_DIR=") { inbox = v }
+                if let v = extractValue("TRANSCRIPTS_DIR=") { transcripts = v }
             }
         }
 
         self.statusFilePath = statusPath
+        self.inboxPath = inbox
+        self.transcriptsPath = transcripts
         startPolling()
     }
 
