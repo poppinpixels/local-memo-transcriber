@@ -230,8 +230,9 @@ Logs:              $LOG_DIR
 Venv:              $VENV_DIR
 launchd plist:     $PLIST_DEST
 
-Dashboard:
-  $VENV_PYTHON $SCRIPT_DIR/dashboard.py --config $CONFIG_DEST --port $DASHBOARD_PORT
+Monitoring:
+  Menu bar app:  cd $SCRIPT_DIR/MenuBarApp && ./build.sh && open build/Memo\ Transcriber.app
+  Web dashboard: $VENV_PYTHON $SCRIPT_DIR/dashboard.py --config $CONFIG_DEST --port $DASHBOARD_PORT
 
 Manual checks:
   tail -f "$LOG_DIR/runtime.log"

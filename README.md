@@ -8,16 +8,17 @@ Fully local macOS pipeline that automatically transcribes iPhone Voice Memos usi
 ├── transcribe_hviske.py
 ├── watch_and_transcribe.sh
 ├── install.sh
-├── dashboard.py        (web dashboard)
-├── status.py           (progress tracking)
+├── dashboard.py            (web dashboard)
+├── status.py               (progress tracking)
+├── MenuBarApp/              (native macOS menu bar app)
 ├── launchd/
-├── inbox/              (iCloud Drive watch folder)
-├── transcripts/        (.txt, .json, .srt output)
-├── done/               (processed audio)
+├── inbox/                   (iCloud Drive watch folder)
+├── transcripts/             (.txt, .json, .srt output)
+├── done/                    (processed audio)
 ├── failed/
 ├── logs/
 ├── tmp/
-├── status.json         (live pipeline state)
+├── status.json              (live pipeline state)
 └── venv/
 ```
 
@@ -182,18 +183,32 @@ Output:
 
 Basename conflicts get `-2`, `-3`, ... suffixes.
 
-## Dashboard
+## Monitoring
 
-A web dashboard shows live pipeline status, queue, processing progress, history, and logs.
+Two GUI options are available to monitor the pipeline. Both read from `status.json`, which the watcher and transcriber update in real time.
+
+### Menu bar app (native macOS)
+
+A lightweight Swift app that lives in your menu bar. Shows a status icon that changes based on pipeline state, with a popover for progress, queue, history, and quick folder access.
+
+Build and run:
+
+```bash
+cd MenuBarApp && ./build.sh && open build/Memo\ Transcriber.app
+```
+
+Requires Xcode Command Line Tools (`xcode-select --install`). The app targets macOS 14+ (Sonoma).
+
+### Web dashboard
+
+A browser-based dashboard with detailed stats, processing progress, system config, and live runtime logs.
 
 ```bash
 ~/LocalMemoTranscriber/venv/bin/python ~/LocalMemoTranscriber/dashboard.py \
   --config ~/LocalMemoTranscriber/config.env
 ```
 
-Opens at `http://127.0.0.1:9888` by default. Use `--port` to change the port, or `--no-open` to skip opening the browser.
-
-The dashboard reads from `status.json` (written by the watcher and transcriber) and scans the inbox, done, and failed directories. It auto-refreshes every 2 seconds with zero external dependencies.
+Opens at `http://127.0.0.1:9888` by default. Use `--port` to change the port, or `--no-open` to skip opening the browser. Auto-refreshes every 2 seconds with zero external dependencies.
 
 ## Logs
 

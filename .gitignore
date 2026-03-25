@@ -17,5 +17,9 @@ __pycache__/
 # Compiled launcher binary (build from launchd/launcher.c)
 launchd/memo-transcriber-launcher
 
+# Menu bar app build artifacts
+MenuBarApp/.build/
+MenuBarApp/build/
+
 # macOS
 .DS_Store
