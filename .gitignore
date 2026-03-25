@@ -1,0 +1,21 @@
+# Runtime data
+inbox/
+done/
+failed/
+tmp/
+transcripts/
+logs/
+
+# Local config (use config.env.example as template)
+config.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Compiled launcher binary (build from launchd/launcher.c)
+launchd/memo-transcriber-launcher
+
+# macOS
+.DS_Store
