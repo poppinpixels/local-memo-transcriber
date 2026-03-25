@@ -132,7 +132,7 @@ def load_config(config_path: Path) -> Config:
     )
 
     return Config(
-        model_id=get("MODEL_ID", "syvai/hviske-v3-conversation"),
+        model_id=get("MODEL_ID", "openai/whisper-large-v3"),
         watch_dir=path_value("WATCH_DIR", str(Path.home() / "LocalMemoTranscriber" / "inbox")),
         transcripts_dir=path_value("TRANSCRIPTS_DIR", str(Path.home() / "LocalMemoTranscriber" / "transcripts")),
         done_dir=path_value("DONE_DIR", str(Path.home() / "LocalMemoTranscriber" / "done")),
@@ -141,7 +141,7 @@ def load_config(config_path: Path) -> Config:
         tmp_dir=path_value("TMP_DIR", str(Path.home() / "LocalMemoTranscriber" / "tmp")),
         ffmpeg_bin=get("FFMPEG_BIN", "ffmpeg"),
         ffprobe_bin=get("FFPROBE_BIN", "ffprobe"),
-        language=get("LANGUAGE", "da"),
+        language=get("LANGUAGE", ""),
         output_formats=output_formats or DEFAULT_OUTPUT_FORMATS,
         normalized_sample_rate=get_int("NORMALIZED_SAMPLE_RATE", 16000),
         normalized_channels=get_int("NORMALIZED_CHANNELS", 1),

@@ -45,8 +45,13 @@ brew install python@3.13 ffmpeg
 ```bash
 git clone https://github.com/poppinpixels/local-memo-transcriber.git ~/LocalMemoTranscriber
 cd ~/LocalMemoTranscriber
-chmod +x install.sh watch_and_transcribe.sh transcribe_hviske.py
 ./install.sh
+```
+
+You can clone to any location -- the installer uses `~/LocalMemoTranscriber` as the default runtime directory regardless of where the repo lives. To use a custom runtime directory:
+
+```bash
+BASE_DIR_OVERRIDE=/path/to/runtime ./install.sh
 ```
 
 The installer will:
@@ -83,21 +88,24 @@ nano ~/LocalMemoTranscriber/config.env
 Key settings:
 
 ```env
-MODEL_ID=syvai/hviske-v3-conversation
+MODEL_ID=openai/whisper-large-v3   # any AutoModelForSpeechSeq2Seq model
+LANGUAGE=                          # ISO 639-1 code (en, da, de, ...) or empty for auto-detect
+DEVICE_PREFERENCE=auto             # auto | cpu | mps
 POLL_INTERVAL_SECONDS=1800
-STABILITY_WAIT_SECONDS=30
-LANGUAGE=da
 WATCH_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/LocalMemoTranscriber/inbox"
-TRANSCRIPTS_DIR=$HOME/LocalMemoTranscriber/transcripts
-DONE_DIR=$HOME/LocalMemoTranscriber/done
-FAILED_DIR=$HOME/LocalMemoTranscriber/failed
-SILENCE_THRESHOLD_DB=-35dB
-MIN_SILENCE_DURATION=0.3
 ```
+
+See `config.env.example` for the full list with explanations of every setting.
 
 ## Model
 
-The default model is [`syvai/hviske-v3-conversation`](https://huggingface.co/syvai/hviske-v3-conversation), a Danish conversational Whisper model. Change `MODEL_ID` in `config.env` to use any compatible `AutoModelForSpeechSeq2Seq` model (e.g. `openai/whisper-large-v3` for multilingual use).
+The default model is [`openai/whisper-large-v3`](https://huggingface.co/openai/whisper-large-v3), a multilingual Whisper model that supports 100+ languages. Change `MODEL_ID` in `config.env` to use any compatible `AutoModelForSpeechSeq2Seq` model. Some examples:
+
+| Model | Use case |
+|-------|----------|
+| `openai/whisper-large-v3` | General multilingual (default) |
+| `openai/whisper-large-v3-turbo` | Faster, slightly less accurate |
+| `syvai/hviske-v3-conversation` | Danish conversational |
 
 If the model is gated, authenticate with `huggingface-cli login` first.
 
@@ -178,8 +186,18 @@ tail -f ~/LocalMemoTranscriber/logs/runtime.log
 tail -f ~/LocalMemoTranscriber/logs/error.log
 ```
 
+## License
+
+MIT License -- see [LICENSE](LICENSE).
+
+This project invokes `ffmpeg` (GPL-2.0+) as a subprocess; it does not link against or bundle ffmpeg. All Python dependencies use permissive licenses (Apache-2.0 or BSD-3-Clause).
+
 ## Known limitations
 
 - Subtitle timestamps are derived from chunk boundaries and generated text, not Whisper timestamp tokens, because timestamp generation degraded quality in local testing.
 - MPS (Apple GPU) may produce unusable output with some models. The pipeline detects this per-chunk and falls back to CPU automatically. Set `DEVICE_PREFERENCE=cpu` to skip MPS entirely.
 - If PyTorch wheels are unavailable for your Python version, install Python 3.13 and rerun with `PYTHON_BIN_OVERRIDE`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
