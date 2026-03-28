@@ -179,6 +179,44 @@ fi
 trap cleanup EXIT INT TERM
 printf '%s\n' "$$" > "$LOCK_DIR/pid"
 log "Watcher started with config: $CONFIG_FILE"
+
+# Clean stale pipeline lock from a dead transcriber.
+PIPELINE_LOCK="$TMP_DIR/.pipeline.pid"
+if [[ -f "$PIPELINE_LOCK" ]]; then
+  OLD_PID=$(cat "$PIPELINE_LOCK" 2>/dev/null)
+  if [[ -n "$OLD_PID" ]] && ! kill -0 "$OLD_PID" 2>/dev/null; then
+    rm -f "$PIPELINE_LOCK"
+    log "Cleaned stale pipeline lock (PID $OLD_PID)"
+  fi
+fi
+
+# Recover orphaned audio files from tmp/ back to inbox.
+while IFS= read -r -d '' orphan; do
+  orphan_name="$(basename "$orphan")"
+  # Skip normalized WAV files and dotfiles.
+  case "$orphan_name" in
+    *.normalized.wav|.*) continue ;;
+  esac
+  if is_supported_audio "$orphan"; then
+    mv "$orphan" "$WATCH_DIR/$orphan_name"
+    log "Recovered orphan from tmp: $orphan_name -> inbox"
+  fi
+done < <(find "$TMP_DIR" -maxdepth 1 -type f -not -name '.*' -print0 2>/dev/null)
+
+# Clean leftover normalized WAV files with no matching audio.
+while IFS= read -r -d '' wav; do
+  base="${wav%.normalized.wav}"
+  has_match=0
+  for ext in m4a mp3 wav mp4 aac; do
+    [[ -f "$base.$ext" ]] && has_match=1 && break
+    [[ -f "$WATCH_DIR/$(basename "$base").$ext" ]] && has_match=1 && break
+  done
+  if [[ "$has_match" -eq 0 ]]; then
+    rm -f "$wav"
+    log "Cleaned orphaned normalized WAV: $(basename "$wav")"
+  fi
+done < <(find "$TMP_DIR" -maxdepth 1 -name '*.normalized.wav' -print0 2>/dev/null)
+
 update_status watcher --state started --pid "$$" --poll-interval "$POLL_INTERVAL_SECONDS"
 
 while true; do

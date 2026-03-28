@@ -940,6 +940,19 @@ def process_file(input_path: Path, config: Config) -> int:
     failed_target: Path | None = None
     written_output_paths: list[Path] = []
     t_start = time.monotonic()
+    interrupted = False
+
+    import signal
+
+    class _Interrupted(Exception):
+        pass
+
+    def _handle_sigterm(signum: int, frame: object) -> None:
+        nonlocal interrupted
+        interrupted = True
+        raise _Interrupted("SIGTERM received")
+
+    prev_handler = signal.signal(signal.SIGTERM, _handle_sigterm)
 
     log_info(config, f"Starting transcription for {input_path}")
 
@@ -1009,7 +1022,13 @@ def process_file(input_path: Path, config: Config) -> int:
         return 0
     except Exception as exc:
         cleanup_output_files(written_output_paths)
-        if working_audio.exists() and working_audio.stat().st_size > 0:
+
+        if interrupted and working_audio.exists() and working_audio.stat().st_size > 0:
+            # Interrupted by SIGTERM — move back to inbox so the next
+            # watcher cycle picks it up instead of losing it in tmp/.
+            requeued = move_to_directory(working_audio, config.watch_dir)
+            log_info(config, f"Interrupted — re-queued {requeued.name} to inbox")
+        elif working_audio.exists() and working_audio.stat().st_size > 0:
             failed_target = move_to_directory(working_audio, config.failed_dir)
         elif working_audio.exists():
             working_audio.unlink(missing_ok=True)
@@ -1023,6 +1042,7 @@ def process_file(input_path: Path, config: Config) -> int:
             tracker.pipeline_failed(original_name=source_original_name, error=str(exc))
         return 1
     finally:
+        signal.signal(signal.SIGTERM, prev_handler)
         normalized_audio.unlink(missing_ok=True)
         lock_file.unlink(missing_ok=True)
 
