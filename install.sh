@@ -61,8 +61,9 @@ render_plist() {
   local stderr_path="$6"
   local project_dir="$7"
   local python_cmd="$8"
+  local launcher_bin="$9"
 
-  "$python_cmd" - "$template_path" "$output_path" "$watch_script" "$config_path" "$stdout_path" "$stderr_path" "$project_dir" <<'PY'
+  "$python_cmd" - "$template_path" "$output_path" "$watch_script" "$config_path" "$stdout_path" "$stderr_path" "$project_dir" "$launcher_bin" <<'PY'
 from pathlib import Path
 import sys
 
@@ -73,6 +74,7 @@ replacements = {
     '__STDOUT_PATH__': sys.argv[5],
     '__STDERR_PATH__': sys.argv[6],
     '__PROJECT_DIR__': sys.argv[7],
+    '__LAUNCHER_BIN__': sys.argv[8],
 }
 for key, value in replacements.items():
     template = template.replace(key, value)
@@ -174,12 +176,24 @@ fi
 
 chmod +x "$WATCH_SCRIPT" "$TRANSCRIBER_SCRIPT" "$SCRIPT_DIR/install.sh" "$SCRIPT_DIR/dashboard.py"
 
+LAUNCHER_SRC="$SCRIPT_DIR/launchd/launcher.c"
+LAUNCHER_BIN="$SCRIPT_DIR/launchd/memo-transcriber-launcher"
+if [[ -f "$LAUNCHER_SRC" ]]; then
+  if [[ ! -x "$LAUNCHER_BIN" ]] || [[ "$LAUNCHER_SRC" -nt "$LAUNCHER_BIN" ]]; then
+    log "Compiling launcher binary for Full Disk Access"
+    cc -o "$LAUNCHER_BIN" "$LAUNCHER_SRC"
+  fi
+else
+  log "Warning: launcher.c not found — launchd will run bash directly (may need Full Disk Access granted to /bin/bash)"
+  LAUNCHER_BIN="/bin/bash"
+fi
+
 if [[ ! -f "$PLIST_TEMPLATE" ]]; then
   echo "launchd template missing: $PLIST_TEMPLATE" >&2
   exit 1
 fi
 
-render_plist "$PLIST_TEMPLATE" "$PLIST_DEST" "$WATCH_SCRIPT" "$CONFIG_DEST" "$WATCH_STDOUT" "$WATCH_STDERR" "$SCRIPT_DIR" "$PYTHON_CMD"
+render_plist "$PLIST_TEMPLATE" "$PLIST_DEST" "$WATCH_SCRIPT" "$CONFIG_DEST" "$WATCH_STDOUT" "$WATCH_STDERR" "$SCRIPT_DIR" "$PYTHON_CMD" "$LAUNCHER_BIN"
 log "Rendered launchd plist: $PLIST_DEST"
 
 if command -v plutil >/dev/null 2>&1; then
@@ -233,6 +247,10 @@ launchd plist:     $PLIST_DEST
 Monitoring:
   Menu bar app:  cd $SCRIPT_DIR/MenuBarApp && ./build.sh && open build/Memo\ Transcriber.app
   Web dashboard: $VENV_PYTHON $SCRIPT_DIR/dashboard.py --config $CONFIG_DEST --port $DASHBOARD_PORT
+
+Full Disk Access (required for iCloud Drive inbox):
+  Grant Full Disk Access to: $LAUNCHER_BIN
+  System Settings > Privacy & Security > Full Disk Access > + > navigate to the path above
 
 Manual checks:
   tail -f "$LOG_DIR/runtime.log"

@@ -901,12 +901,35 @@ def run_dry_run(config: Config, input_path: Path | None) -> None:
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
+def _acquire_pipeline_lock(config: Config) -> Path | None:
+    """Acquire a PID-based lock to prevent concurrent transcriptions."""
+    lock_file = config.tmp_dir / ".pipeline.pid"
+    if lock_file.exists():
+        try:
+            existing_pid = int(lock_file.read_text().strip())
+            # Check if the process is still alive.
+            os.kill(existing_pid, 0)
+            log_info(config, f"Another transcription is already running (PID {existing_pid}). Skipping.")
+            return None
+        except (ProcessLookupError, ValueError):
+            pass  # Stale lock — process is dead.
+        except PermissionError:
+            log_info(config, f"Another transcription is already running. Skipping.")
+            return None
+    lock_file.write_text(str(os.getpid()))
+    return lock_file
+
+
 def process_file(input_path: Path, config: Config) -> int:
     ensure_directories(config)
     validate_input_file(input_path)
 
     shutil.which(config.ffmpeg_bin) or (_ for _ in ()).throw(FileNotFoundError(f"ffmpeg not found: {config.ffmpeg_bin}"))
     shutil.which(config.ffprobe_bin) or (_ for _ in ()).throw(FileNotFoundError(f"ffprobe not found: {config.ffprobe_bin}"))
+
+    lock_file = _acquire_pipeline_lock(config)
+    if lock_file is None:
+        return 0
 
     tracker = config.tracker()
     basename = resolve_unique_basename(input_path, config)
@@ -1001,6 +1024,7 @@ def process_file(input_path: Path, config: Config) -> int:
         return 1
     finally:
         normalized_audio.unlink(missing_ok=True)
+        lock_file.unlink(missing_ok=True)
 
 
 def main() -> int:

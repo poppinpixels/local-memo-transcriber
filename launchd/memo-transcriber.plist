@@ -7,6 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
+      <string>__LAUNCHER_BIN__</string>
       <string>__WATCH_SCRIPT__</string>
       <string>--config</string>
       <string>__CONFIG_PATH__</string>

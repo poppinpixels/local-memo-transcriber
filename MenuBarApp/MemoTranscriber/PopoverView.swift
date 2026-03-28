@@ -6,28 +6,28 @@ struct PopoverView: View {
 
     private let uiTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
+    private var isBusy: Bool {
+        monitor.pipeline.isProcessing || monitor.scanRunning
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             headerSection
             Divider()
 
-            if monitor.pipeline.isProcessing {
-                processingSection
-            } else {
-                idleSection
-            }
+            statusSection
+            Divider()
 
-            if let count = monitor.watcher.filesInQueue, count > 0 {
+            if !monitor.queueFiles.isEmpty {
+                queueSection
                 Divider()
-                queueSection(count: count)
             }
 
             if !monitor.history.isEmpty {
-                Divider()
                 historySection
+                Divider()
             }
 
-            Divider()
             actionsSection
         }
         .frame(width: 300)
@@ -56,23 +56,39 @@ struct PopoverView: View {
 
     private var statusColor: Color {
         if monitor.pipeline.isProcessing { return .blue }
+        if monitor.scanRunning { return .orange }
         if monitor.watcher.isRunning { return .green }
         return .red
     }
 
     private var statusText: String {
         if monitor.pipeline.isProcessing { return "Processing" }
+        if monitor.scanRunning { return "Scanning" }
         if monitor.watcher.isRunning { return "Running" }
         return "Stopped"
     }
 
-    // MARK: - Processing
+    // MARK: - Status (unified processing / scanning / idle)
 
-    private var processingSection: some View {
+    private var statusSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if monitor.pipeline.isProcessing {
+                processingContent
+            } else if monitor.scanRunning {
+                scanningContent
+            } else {
+                idleContent
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private var processingContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(monitor.pipeline.originalName ?? monitor.pipeline.file ?? "Unknown file")
                 .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
+                .lineLimit(2)
                 .truncationMode(.middle)
 
             HStack {
@@ -109,17 +125,40 @@ struct PopoverView: View {
             }
             .frame(height: 4)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
     }
 
-    // MARK: - Idle
-
-    private var idleSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Idle")
+    private var scanningContent: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.7)
+                .frame(width: 14, height: 14)
+            Text("Scanning inbox for new files...")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
+        }
+    }
+
+    private var idleContent: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Idle")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button(action: { monitor.scanNow() }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 8))
+                        Text("Scan Now")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.15))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+            }
 
             if let next = monitor.watcher.nextPollAt {
                 let diff = next.timeIntervalSince(now)
@@ -134,23 +173,63 @@ struct PopoverView: View {
                 }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
     }
 
     // MARK: - Queue
 
-    private func queueSection(count: Int) -> some View {
-        HStack {
-            Image(systemName: "tray.full")
-                .font(.system(size: 10))
+    private var queueSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Queue (\(monitor.queueFiles.count))")
+                .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.secondary)
-            Text("\(count) file\(count == 1 ? "" : "s") queued")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
+                .textCase(.uppercase)
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+
+            ForEach(monitor.queueFiles) { file in
+                let active = isCurrentlyProcessing(file.name)
+                HStack(spacing: 8) {
+                    Image(systemName: active ? "waveform" : "doc.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(active ? .blue : .secondary)
+
+                    Text(file.name)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    Spacer()
+
+                    if active {
+                        Text(monitor.pipeline.stepLabel)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.blue)
+                    } else if monitor.scanRunning {
+                        Text("Waiting")
+                            .font(.system(size: 10))
+                            .foregroundColor(.orange)
+                    } else {
+                        Text(formatBytes(file.sizeBytes))
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 3)
+            }
+            .padding(.bottom, 4)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+    }
+
+    private func isCurrentlyProcessing(_ name: String) -> Bool {
+        monitor.pipeline.isProcessing && monitor.pipeline.originalName == name
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1_048_576 { return String(format: "%.1f KB", Double(bytes) / 1024) }
+        return String(format: "%.1f MB", Double(bytes) / 1_048_576)
     }
 
     // MARK: - History
