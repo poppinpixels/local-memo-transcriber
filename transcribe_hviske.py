@@ -348,7 +348,17 @@ def resolve_safe_max_new_tokens(
     return min(requested_max_new_tokens, safe_max_new_tokens)
 
 
-def load_pipeline(config: Config, force_device: str | None = None) -> LoadedPipeline:
+def _prefer_bf16_for_model(model_id: str) -> bool:
+    """True for hviske v5+ (cohere_asr) — trained in bf16, so bf16 is native precision.
+
+    Earlier hviske versions (and Whisper in general) keep fp32 on MPS to avoid
+    historical bf16 op-coverage bugs on Apple Silicon.
+    """
+    match = re.search(r"hviske-v(\d+)", model_id.lower())
+    return bool(match and int(match.group(1)) >= 5)
+
+
+def load_pipeline(config: Config, force_device: str | None = None, force_dtype: Any = None) -> LoadedPipeline:
     try:
         import torch
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
@@ -359,26 +369,35 @@ def load_pipeline(config: Config, force_device: str | None = None) -> LoadedPipe
 
     candidates: list[tuple[str, Any]] = []
     preference = (force_device or config.device_preference).lower()
+    mps_dtype = torch.bfloat16 if _prefer_bf16_for_model(config.model_id) else torch.float32
 
-    if preference == "cpu":
+    if force_dtype is not None and force_device:
+        candidates = [(force_device, force_dtype)]
+    elif preference == "cpu":
         candidates = [("cpu", torch.float32)]
     elif preference == "mps":
         if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            candidates = [("mps", torch.float32), ("cpu", torch.float32)]
+            candidates = [("mps", mps_dtype), ("mps", torch.float32), ("cpu", torch.float32)]
+            # Deduplicate while preserving order: skip the second "mps" entry if it's the same dtype.
+            seen: set[tuple[str, Any]] = set()
+            candidates = [c for c in candidates if not (c in seen or seen.add(c))]
         else:
             candidates = [("cpu", torch.float32)]
     else:
         if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            candidates.append(("mps", torch.float32))
+            candidates.append(("mps", mps_dtype))
+            if mps_dtype is not torch.float32:
+                candidates.append(("mps", torch.float32))
         candidates.append(("cpu", torch.float32))
 
     last_error: Exception | None = None
 
     for device_name, dtype in candidates:
         try:
-            processor = AutoProcessor.from_pretrained(config.model_id)
+            processor = AutoProcessor.from_pretrained(config.model_id, trust_remote_code=True)
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
                 config.model_id,
+                trust_remote_code=True,
                 dtype=dtype,
                 low_cpu_mem_usage=True,
                 use_safetensors=True,
@@ -597,15 +616,127 @@ def generate_whisper_chunk_text(
     raise PipelineError("Direct Whisper generation returned empty output")
 
 
+COHERE_CHUNK_SECONDS = 300
+COHERE_STRIDE_SECONDS = 60
+
+
+def transcribe_cohere_segment(
+    loaded: LoadedPipeline,
+    chunk_audio: np.ndarray,
+    sample_rate: int,
+    config: Config,
+) -> str:
+    language = config.language or "da"
+    result = loaded.model.transcribe(
+        processor=loaded.processor,
+        language=language,
+        audio_arrays=[chunk_audio],
+        sample_rates=[sample_rate],
+    )
+    return (result[0] if result else "").strip()
+
+
+def free_mps_memory() -> None:
+    try:
+        import gc
+        import torch
+        gc.collect()
+        if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
+
+def transcribe_cohere_in_chunks(
+    loaded: LoadedPipeline,
+    waveform: np.ndarray,
+    sample_rate: int,
+    chunk_ranges: list[tuple[int, int]],
+    config: Config,
+    tracker: StatusTracker | None,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    chunk_texts: list[str] = []
+    chunk_summaries: list[dict[str, Any]] = []
+    for chunk_idx, (start_sample, end_sample) in enumerate(chunk_ranges):
+        if tracker:
+            tracker.update_pipeline(
+                state="transcribing",
+                chunk_index=chunk_idx + 1,
+                chunk_total=len(chunk_ranges),
+            )
+        chunk_audio = waveform[start_sample:end_sample]
+        chunk_start_seconds = start_sample / sample_rate
+        chunk_end_seconds = end_sample / sample_rate
+        text = transcribe_cohere_segment(loaded, chunk_audio, sample_rate, config)
+        if not text:
+            continue
+        chunk_texts.append(text)
+        chunk_summaries.append({
+            "start": chunk_start_seconds,
+            "end": chunk_end_seconds,
+            "text": text,
+        })
+    return chunk_texts, chunk_summaries
+
+
 def transcribe_audio(loaded: LoadedPipeline, audio_path: Path, config: Config, duration_seconds: float, *, silence_points: list[float] | None = None, tracker: StatusTracker | None = None) -> dict[str, Any]:
-    if loaded.model_type != "whisper":
+    if loaded.model_type not in ("whisper", "cohere_asr"):
         raise PipelineError(
-            f"Model {config.model_id} is model_type={loaded.model_type or 'unknown'}, but this pipeline now uses direct Whisper generation."
+            f"Model {config.model_id} is model_type={loaded.model_type or 'unknown'}; this pipeline supports whisper or cohere_asr only."
         )
 
     waveform, sample_rate = load_normalized_waveform(audio_path)
     if waveform.size == 0:
         raise PipelineError("Normalized audio file is empty")
+
+    if loaded.model_type == "cohere_asr":
+        if silence_points:
+            cohere_chunk_ranges = build_silence_aware_chunks(
+                len(waveform), sample_rate, COHERE_CHUNK_SECONDS, COHERE_STRIDE_SECONDS, silence_points,
+            )
+        else:
+            cohere_chunk_ranges = iterate_audio_chunks(len(waveform), sample_rate, COHERE_CHUNK_SECONDS)
+
+        current_loaded = loaded
+        try:
+            chunk_texts, chunk_summaries = transcribe_cohere_in_chunks(
+                current_loaded, waveform, sample_rate, cohere_chunk_ranges, config, tracker,
+            )
+        except Exception as exc:
+            on_mps = current_loaded.device_name == "mps"
+            can_leave_mps = config.device_preference != "mps"
+            if on_mps and can_leave_mps:
+                log_info(config, f"MPS cohere transcribe failed ({exc!r}); freeing MPS and falling back to CPU")
+                current_loaded = None  # type: ignore[assignment]
+                free_mps_memory()
+                current_loaded = load_pipeline(config, force_device="cpu")
+                chunk_texts, chunk_summaries = transcribe_cohere_in_chunks(
+                    current_loaded, waveform, sample_rate, cohere_chunk_ranges, config, tracker,
+                )
+            else:
+                raise PipelineError(f"cohere_asr transcribe failed: {exc}") from exc
+
+        transcript_text = " ".join(t for t in chunk_texts if t).strip()
+        if not transcript_text and duration_seconds > 0:
+            raise PipelineError("Transcription returned empty transcript")
+
+        chunks: list[dict[str, Any]] = []
+        for summary in chunk_summaries:
+            chunks.extend(build_approximate_chunks(summary["text"], summary["start"], summary["end"]))
+
+        return {
+            "text": transcript_text,
+            "chunks": chunks,
+            "engine": "cohere-transcribe",
+            "model_type": current_loaded.model_type,
+            "device_used": current_loaded.device_name,
+            "dtype_used": current_loaded.dtype_name,
+            "approximate_timestamps": True,
+            "silence_aware_chunks": bool(silence_points),
+            "chunk_length_seconds": COHERE_CHUNK_SECONDS,
+            "chunk_count": len(chunk_summaries),
+            "chunk_transcripts": chunk_summaries,
+        }
 
     if silence_points:
         chunk_ranges = build_silence_aware_chunks(
