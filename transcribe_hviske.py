@@ -31,6 +31,7 @@ DEFAULT_OUTPUT_FORMATS = ("txt", "json", "srt")
 @dataclass
 class Config:
     model_id: str
+    model_revision: str
     watch_dir: Path
     transcripts_dir: Path
     done_dir: Path
@@ -145,6 +146,7 @@ def load_config(config_path: Path) -> Config:
 
     return Config(
         model_id=get("MODEL_ID", "openai/whisper-large-v3"),
+        model_revision=get("MODEL_REVISION", ""),
         watch_dir=path_value("WATCH_DIR", str(Path.home() / "LocalMemoTranscriber" / "inbox")),
         transcripts_dir=path_value("TRANSCRIPTS_DIR", str(Path.home() / "LocalMemoTranscriber" / "transcripts")),
         done_dir=path_value("DONE_DIR", str(Path.home() / "LocalMemoTranscriber" / "done")),
@@ -392,15 +394,20 @@ def load_pipeline(config: Config, force_device: str | None = None, force_dtype: 
 
     last_error: Exception | None = None
 
+    revision_kwargs: dict[str, str] = {"revision": config.model_revision} if config.model_revision else {}
+
     for device_name, dtype in candidates:
         try:
-            processor = AutoProcessor.from_pretrained(config.model_id, trust_remote_code=True)
+            processor = AutoProcessor.from_pretrained(
+                config.model_id, trust_remote_code=True, **revision_kwargs
+            )
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
                 config.model_id,
                 trust_remote_code=True,
                 dtype=dtype,
                 low_cpu_mem_usage=True,
                 use_safetensors=True,
+                **revision_kwargs,
             )
             model.to(device_name)
             model.eval()

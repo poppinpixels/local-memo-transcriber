@@ -1,6 +1,6 @@
 # Local Memo Transcriber
 
-Fully local macOS pipeline that automatically transcribes iPhone Voice Memos using a Hugging Face Whisper model. No cloud APIs, no subscriptions -- everything runs on your Mac.
+Fully local macOS pipeline that automatically transcribes iPhone Voice Memos using a Hugging Face ASR model (Whisper or `cohere_asr`). No cloud APIs, no subscriptions -- everything runs on your Mac.
 
 ```text
 ~/LocalMemoTranscriber/
@@ -30,7 +30,7 @@ Fully local macOS pipeline that automatically transcribes iPhone Voice Memos usi
 4. The watcher waits for file stability (handles iCloud sync delays and partially downloaded files).
 5. `ffmpeg` normalizes the audio to mono 16 kHz PCM WAV.
 6. Silence points are detected to split long audio at natural pauses instead of hard time cuts.
-7. A local Whisper model transcribes each chunk. If Apple GPU (MPS) produces unusable output, it falls back to CPU automatically.
+7. A local ASR model transcribes the audio (Whisper does per-chunk `model.generate()`; `cohere_asr` models use `model.transcribe()` on coarser 5-minute outer chunks). If Apple GPU (MPS) produces unusable output, the pipeline falls back to CPU automatically.
 8. Outputs (`.txt`, `.json`, `.srt`) are written to `transcripts/`.
 9. The original audio moves to `done/`, or `failed/` if anything breaks.
 
@@ -93,6 +93,7 @@ Key settings:
 
 ```env
 MODEL_ID=openai/whisper-large-v3   # any AutoModelForSpeechSeq2Seq model
+MODEL_REVISION=                    # optional: pin to a specific HF commit SHA
 LANGUAGE=                          # ISO 639-1 code (en, da, de, ...) or empty for auto-detect
 DEVICE_PREFERENCE=auto             # auto | cpu | mps
 POLL_INTERVAL_SECONDS=1800
@@ -105,15 +106,44 @@ See `config.env.example` for the full list with explanations of every setting.
 
 The default model is [`openai/whisper-large-v3`](https://huggingface.co/openai/whisper-large-v3), a multilingual Whisper model that supports 100+ languages. Change `MODEL_ID` in `config.env` to use any compatible `AutoModelForSpeechSeq2Seq` model. Some examples:
 
-| Model | Use case |
-|-------|----------|
-| `openai/whisper-large-v3` | General multilingual (default) |
-| `openai/whisper-large-v3-turbo` | Faster, slightly less accurate |
-| `syvai/hviske-v3-conversation` | Danish conversational |
+| Model | Architecture | Use case |
+|-------|--------------|----------|
+| `openai/whisper-large-v3` | whisper | General multilingual (default) |
+| `openai/whisper-large-v3-turbo` | whisper | Faster, slightly less accurate |
+| `syvai/hviske-v3-conversation` | whisper | Danish conversational (Whisper fine-tune) |
+| `syvai/hviske-v5.3` | cohere_asr | Danish, ~6× faster than v3 on Apple Silicon, fewer hallucinations |
 
 If the model is gated, authenticate with `huggingface-cli login` first.
 
-The pipeline uses direct `model.generate(...)` calls rather than the generic Transformers ASR pipeline, which produced better results in local testing.
+The Whisper path uses direct `model.generate(...)` calls per silence-aware 30 s chunk. The `cohere_asr` path uses `model.transcribe(...)` on coarser 5-minute outer chunks at silence boundaries, since the model handles overlap-aware sub-chunking internally.
+
+### `trust_remote_code` and `MODEL_REVISION`
+
+Models like `syvai/hviske-v5.3` ship custom Python code in their HF repo (a `modeling_cohere_asr.py`). To load them the pipeline passes `trust_remote_code=True` to `from_pretrained()`. This means **Hugging Face will silently download updated versions of that custom code on every run** if the model's `main` branch advances. That's a security and reproducibility risk -- a hostile update could execute arbitrary Python in your venv.
+
+To pin a known-good revision:
+
+```env
+MODEL_ID=syvai/hviske-v5.3
+MODEL_REVISION=3f61b9c42f9cde65ce36bb621b6e03a2d0b379f9   # specific commit SHA on the HF repo
+```
+
+`MODEL_REVISION` is passed to `AutoProcessor.from_pretrained` and `AutoModelForSpeechSeq2Seq.from_pretrained`, locking both the weights and the custom code to that commit. Leave it empty to track `main` (auto-update, faster setup, lower review burden).
+
+You can find the current SHA in your local cache after a successful run:
+
+```bash
+cat ~/.cache/huggingface/hub/models--syvai--hviske-v5.3/refs/main
+```
+
+### Device + dtype
+
+On Apple Silicon (MPS) the pipeline picks dtype based on the model:
+
+- Whisper (`hviske-v3-conversation`, OpenAI Whisper) -> `float32` (Whisper has historical bf16 op-coverage issues on MPS).
+- `hviske-v5.x` -> `bfloat16` (matches the model's training dtype, halves weight memory). Falls back to `float32` if MPS bf16 fails to load.
+
+On 16 GB Macs, `hviske-v5.3` at bf16 fits comfortably; at fp32 it spills heavily into swap.
 
 ## Manual commands
 
