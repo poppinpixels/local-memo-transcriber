@@ -17,9 +17,10 @@ import argparse
 import json
 import os
 import sys
+import time
 import webbrowser
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
@@ -390,6 +391,14 @@ body {
   margin-left: 8px;
 }
 .refresh-dot.flash { opacity: 1; }
+.update-age {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 40px;
+  text-align: right;
+}
 </style>
 </head>
 <body>
@@ -402,6 +411,7 @@ body {
         <span id="statusText">Loading...</span>
       </div>
       <div class="refresh-dot" id="refreshDot"></div>
+      <span class="update-age" id="updateAge" title="seconds since last status update">--</span>
     </div>
   </div>
 
@@ -656,21 +666,60 @@ function render(data) {
   }
 }
 
-async function refresh() {
+function flashDot() {
+  const dot = document.getElementById('refreshDot');
+  if (!dot) return;
+  dot.classList.add('flash');
+  setTimeout(() => dot.classList.remove('flash'), 300);
+}
+
+let lastUpdateAt = Date.now();
+function markUpdate() { lastUpdateAt = Date.now(); }
+function formatAge(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm ' + (s % 60) + 's';
+  const h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60) + 'm';
+}
+setInterval(() => {
+  const el = document.getElementById('updateAge');
+  if (el) el.textContent = formatAge(Date.now() - lastUpdateAt);
+}, 1000);
+
+async function fetchOnce() {
   try {
     const resp = await fetch('/api/status');
     const data = await resp.json();
     render(data);
-    const dot = document.getElementById('refreshDot');
-    dot.classList.add('flash');
-    setTimeout(() => dot.classList.remove('flash'), 300);
+    flashDot();
+    markUpdate();
   } catch (err) {
-    console.error('Refresh failed:', err);
+    console.error('Initial fetch failed:', err);
   }
 }
 
-refresh();
-setInterval(refresh, 2000);
+let evtSource = null;
+function startEventStream() {
+  if (evtSource) { try { evtSource.close(); } catch (_) {} }
+  evtSource = new EventSource('/events');
+  evtSource.onmessage = (e) => {
+    if (!e.data) return;
+    try {
+      render(JSON.parse(e.data));
+      flashDot();
+      markUpdate();
+    } catch (err) {
+      console.error('SSE parse failed:', err);
+    }
+  };
+  evtSource.onerror = () => {
+    // EventSource handles reconnect natively; no-op.
+  };
+}
+
+fetchOnce().then(startEventStream);
 </script>
 </body>
 </html>"""
@@ -684,10 +733,50 @@ def make_handler(config_env: dict[str, str], config_path: Path) -> type:
         def do_GET(self) -> None:
             if self.path == "/api/status":
                 self._send_json(build_api_response(config_env, config_path))
+            elif self.path == "/events":
+                self._stream_events()
             elif self.path in ("/", "/index.html"):
                 self._send_html(DASHBOARD_HTML)
             else:
                 self.send_error(404)
+
+        def _stream_events(self) -> None:
+            status_raw = config_env.get("STATUS_FILE", "").strip()
+            status_path = Path(os.path.expandvars(os.path.expanduser(status_raw))) if status_raw else None
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+
+            def current_mtime() -> float:
+                if status_path is None:
+                    return 0.0
+                try:
+                    return status_path.stat().st_mtime
+                except OSError:
+                    return 0.0
+
+            last_mtime = -1.0
+            last_send = 0.0
+            try:
+                while True:
+                    mtime = current_mtime()
+                    now = time.time()
+                    if mtime != last_mtime:
+                        last_mtime = mtime
+                        payload = json.dumps(build_api_response(config_env, config_path), ensure_ascii=False)
+                        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                        last_send = now
+                    elif now - last_send > 20:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        last_send = now
+                    time.sleep(0.25)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
 
         def _send_json(self, data: dict[str, Any]) -> None:
             body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -724,7 +813,8 @@ def main() -> int:
     config_env = read_env_file(config_path)
 
     handler_class = make_handler(config_env, config_path)
-    server = HTTPServer(("127.0.0.1", args.port), handler_class)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_class)
+    server.daemon_threads = True
     url = f"http://127.0.0.1:{args.port}"
     print(f"Dashboard running at {url}")
     print("Press Ctrl+C to stop.\n")
