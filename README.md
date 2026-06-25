@@ -1,6 +1,6 @@
 # Local Memo Transcriber
 
-Fully local macOS pipeline that automatically transcribes iPhone Voice Memos using a Hugging Face ASR model (Whisper or `cohere_asr`). No cloud APIs, no subscriptions -- everything runs on your Mac.
+Fully local macOS pipeline that automatically transcribes iPhone Voice Memos using a Hugging Face ASR model syv.ai/Hviske-5.3. No cloud APIs, no subscriptions -- everything runs on your Mac.
 
 ```text
 ~/LocalMemoTranscriber/
