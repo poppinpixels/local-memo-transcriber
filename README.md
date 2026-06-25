@@ -1,43 +1,58 @@
 # Local Memo Transcriber
 
-Fully local macOS pipeline that automatically transcribes iPhone Voice Memos using a Hugging Face ASR model syv.ai/Hviske-5.3. No cloud APIs, no subscriptions -- everything runs on your Mac.
-
-```text
-~/LocalMemoTranscriber/
-├── config.env
-├── transcribe_hviske.py
-├── watch_and_transcribe.sh
-├── install.sh
-├── dashboard.py            (web dashboard)
-├── status.py               (progress tracking)
-├── MenuBarApp/              (native macOS menu bar app)
-├── launchd/
-├── inbox/                   (iCloud Drive watch folder)
-├── transcripts/             (.txt, .json, .srt output)
-├── done/                    (processed audio)
-├── failed/
-├── logs/
-├── tmp/
-├── status.json              (live pipeline state)
-└── venv/
-```
+Fully local macOS pipeline that transcribes audio recordings using a Hugging Face ASR model. No cloud APIs, no subscriptions - everything runs on your Mac.
 
 ## How it works
 
-1. Record a Voice Memo on iPhone and share it to **Files > iCloud Drive > LocalMemoTranscriber > inbox**.
-2. The file syncs to the Mac via iCloud Drive.
-3. A `launchd` agent polls the inbox every 30 minutes.
-4. The watcher waits for file stability (handles iCloud sync delays and partially downloaded files).
-5. `ffmpeg` normalizes the audio to mono 16 kHz PCM WAV.
-6. Silence points are detected to split long audio at natural pauses instead of hard time cuts.
-7. A local ASR model transcribes the audio (Whisper does per-chunk `model.generate()`; `cohere_asr` models use `model.transcribe()` on coarser 5-minute outer chunks). If Apple GPU (MPS) produces unusable output, the pipeline falls back to CPU automatically.
-8. Outputs (`.txt`, `.json`, `.srt`) are written to `transcripts/`.
-9. The original audio moves to `done/`, or `failed/` if anything breaks.
+```
+iPhone Voice Memo
+  -> Shortcut posts file via HTTP (multipart upload)
+  -> Upload server writes atomically to inbox/ (write .part, fsync, rename)
+  -> Daemon detects file within 10 seconds
+  -> ffmpeg normalises to mono 16kHz PCM WAV
+  -> Silence-aware chunking splits at natural pauses
+  -> hviske-v5.3 transcribes each chunk on Apple Silicon (MPS/bf16)
+  -> Repetition cleaner collapses ASR loops
+  -> Outputs .txt, .json, .srt to transcripts/
+  -> Original audio moves to done/ (or failed/ on error)
+  -> macOS notification fires on completion or permanent failure
+```
+
+## Architecture
+
+```
+~/LocalMemoTranscriber/              # runtime directory
+├── config.env                       # all configuration
+├── inbox/                           # audio files arrive here
+├── transcripts/                     # .txt, .json, .srt output
+├── done/                            # processed originals
+├── failed/                          # failed originals (after 3 retries)
+├── logs/                            # runtime.log, error.log, launchd logs
+├── tmp/
+│   ├── processing/                  # file being actively transcribed
+│   └── .daemon.lock                 # flock (kernel-released on death)
+├── status.json                      # live pipeline state
+└── venv/                            # Python virtualenv
+
+~/projects/local-memo-transcriber/   # code directory
+├── daemon.py                        # watcher: 10s poll, flock, retry, notifications
+├── upload_server.py                 # HTTP endpoint: POST /upload, GET /status
+├── transcribe_hviske.py             # transcription engine (frozen - do not modify)
+├── clean_repetitions.py             # post-processing: collapse ASR repetition loops
+├── status.py                        # status tracking (frozen)
+├── start_services.sh                # launchd launcher (starts daemon + server)
+├── dashboard.py                     # standalone web dashboard (optional)
+├── MenuBarApp/                      # native macOS menu bar app (optional)
+├── launchd/
+│   ├── memo-transcriber-launcher    # compiled C wrapper for Full Disk Access
+│   └── memo-transcriber.plist       # launchd agent template
+└── config.env.example               # annotated config reference
+```
 
 ## Requirements
 
 - macOS on Apple Silicon
-- Python 3.11+ (3.11-3.13 preferred for PyTorch wheel availability)
+- Python 3.11+ (3.13 preferred for PyTorch wheel availability)
 - `ffmpeg` and `ffprobe` in PATH
 
 ```bash
@@ -47,118 +62,186 @@ brew install python@3.13 ffmpeg
 ## Install
 
 ```bash
-git clone https://github.com/poppinpixels/local-memo-transcriber.git ~/LocalMemoTranscriber
-cd ~/LocalMemoTranscriber
+git clone https://github.com/poppinpixels/local-memo-transcriber.git ~/projects/local-memo-transcriber
+cd ~/projects/local-memo-transcriber
 ./install.sh
 ```
 
-You can clone to any location -- the installer uses `~/LocalMemoTranscriber` as the default runtime directory regardless of where the repo lives. To use a custom runtime directory:
-
-```bash
-BASE_DIR_OVERRIDE=/path/to/runtime ./install.sh
-```
-
 The installer will:
-
-- create the runtime folder structure
+- create the runtime folder structure at `~/LocalMemoTranscriber/`
 - create a venv and install Python dependencies
 - copy `config.env.example` to `config.env` if missing
-- render the `launchd` plist
+- render the launchd plist
 - dry-run the config check
 - load and start the launchd agent
 
-If your default `python3` is not the one you want:
-
-```bash
-PYTHON_BIN_OVERRIDE=/opt/homebrew/bin/python3.13 ./install.sh
-```
-
-Other install toggles:
-
-```bash
-SKIP_LAUNCHD=1 ./install.sh                                          # skip launchd registration
-SKIP_PIP_INSTALL=1 SKIP_LAUNCHD=1 ./install.sh                       # skip pip + launchd
-BASE_DIR_OVERRIDE="$PWD/.test-runtime" SKIP_LAUNCHD=1 ./install.sh   # isolated test install
-```
-
 ## Configure
 
-Edit the runtime config after install:
+Edit the runtime config:
 
 ```bash
-nano ~/LocalMemoTranscriber/config.env
+# ~/LocalMemoTranscriber/config.env
+MODEL_ID=syvai/hviske-v5.3
+MODEL_REVISION=3f61b9c42f9cde65ce36bb621b6e03a2d0b379f9
+LANGUAGE=da
+WATCH_DIR=$HOME/LocalMemoTranscriber/inbox
+POLL_INTERVAL_SECONDS=10
+MAX_RETRIES=3
+UPLOAD_PORT=9889
+NOTIFY_ON_SUCCESS=true
+NOTIFY_ON_FAILURE=true
 ```
 
-Key settings:
+See `config.env.example` for the full list with explanations.
 
-```env
-MODEL_ID=openai/whisper-large-v3   # any AutoModelForSpeechSeq2Seq model
-MODEL_REVISION=                    # optional: pin to a specific HF commit SHA
-LANGUAGE=                          # ISO 639-1 code (en, da, de, ...) or empty for auto-detect
-DEVICE_PREFERENCE=auto             # auto | cpu | mps
-POLL_INTERVAL_SECONDS=1800
-WATCH_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/LocalMemoTranscriber/inbox"
+## File delivery
+
+### iPhone Shortcut (recommended)
+
+Create a Shortcut that posts the Voice Memo via HTTP:
+
+1. **Select File** (audio)
+2. **Get Contents of URL** -> POST to `http://<mac-ip>:9889/upload`, pass the file as multipart form data
+3. **Show Notification** with the response
+
+The upload server writes atomically (`.part` file, fsync, `os.rename`), so the daemon only ever sees complete files. No stability wait, no stub detection needed.
+
+### Manual copy
+
+```bash
+cp recording.m4a ~/LocalMemoTranscriber/inbox/
 ```
 
-See `config.env.example` for the full list with explanations of every setting.
+The daemon polls every 10 seconds. The file will be picked up automatically.
+
+### Off-LAN delivery
+
+Install [Tailscale](https://tailscale.com) on both devices. Use the Mac's Tailscale IP in the Shortcut URL. Works from any network, encrypted, no port forwarding.
 
 ## Model
 
-The default model is [`openai/whisper-large-v3`](https://huggingface.co/openai/whisper-large-v3), a multilingual Whisper model that supports 100+ languages. Change `MODEL_ID` in `config.env` to use any compatible `AutoModelForSpeechSeq2Seq` model. Some examples:
+The default model is [`syvai/hviske-v5.3`](https://huggingface.co/syvai/hviske-v5.3), a Danish-optimised cohere_asr model. ~6x faster than Whisper on Apple Silicon with fewer hallucinations.
 
 | Model | Architecture | Use case |
 |-------|--------------|----------|
-| `openai/whisper-large-v3` | whisper | General multilingual (default) |
+| `syvai/hviske-v5.3` | cohere_asr | Danish, fast, fewer hallucinations (default) |
+| `openai/whisper-large-v3` | whisper | General multilingual |
 | `openai/whisper-large-v3-turbo` | whisper | Faster, slightly less accurate |
 | `syvai/hviske-v3-conversation` | whisper | Danish conversational (Whisper fine-tune) |
-| `syvai/hviske-v5.3` | cohere_asr | Danish, ~6× faster than v3 on Apple Silicon, fewer hallucinations |
 
 If the model is gated, authenticate with `huggingface-cli login` first.
 
-The Whisper path uses direct `model.generate(...)` calls per silence-aware 30 s chunk. The `cohere_asr` path uses `model.transcribe(...)` on coarser 5-minute outer chunks at silence boundaries, since the model handles overlap-aware sub-chunking internally.
+### Device + dtype
+
+On Apple Silicon (MPS):
+- `hviske-v5.x` -> `bfloat16` (matches training dtype, halves memory)
+- Whisper -> `float32` (historical bf16 op-coverage issues on MPS)
+
+The pipeline detects unusable MPS output per-chunk and falls back to CPU automatically.
 
 ### `trust_remote_code` and `MODEL_REVISION`
 
-Models like `syvai/hviske-v5.3` ship custom Python code in their HF repo (a `modeling_cohere_asr.py`). To load them the pipeline passes `trust_remote_code=True` to `from_pretrained()`. This means **Hugging Face will silently download updated versions of that custom code on every run** if the model's `main` branch advances. That's a security and reproducibility risk -- a hostile update could execute arbitrary Python in your venv.
+Models like `syvai/hviske-v5.3` ship custom Python code. The pipeline passes `trust_remote_code=True` and pins `MODEL_REVISION` to a known-good commit SHA to prevent silent code updates.
 
-To pin a known-good revision:
+## Post-processing
 
-```env
-MODEL_ID=syvai/hviske-v5.3
-MODEL_REVISION=3f61b9c42f9cde65ce36bb621b6e03a2d0b379f9   # specific commit SHA on the HF repo
-```
+### Repetition cleaning
 
-`MODEL_REVISION` is passed to `AutoProcessor.from_pretrained` and `AutoModelForSpeechSeq2Seq.from_pretrained`, locking both the weights and the custom code to that commit. Leave it empty to track `main` (auto-update, faster setup, lower review burden).
+hviske-v5.3 uses greedy decoding (`do_sample=False, num_beams=1`) which can enter repetition loops during silence. The `clean_repetitions.py` script runs automatically after each transcription and collapses:
 
-You can find the current SHA in your local cache after a successful run:
+- Consecutive identical tokens: `4 4 4 4 4` -> `4 4` (keeps natural doubles like "nej nej")
+- Repeated n-grams: `det er en det er en det er en` -> `det er en`
+
+Cleans `.txt`, `.json` (including segments), and `.srt` files.
+
+## Monitoring
+
+### Web dashboard
+
+The upload server includes a built-in status page at `http://<mac-ip>:9889/`. Shows watcher state, pipeline progress, queue, and history. Auto-refreshes every 5 seconds.
+
+### JSON API
 
 ```bash
-cat ~/.cache/huggingface/hub/models--syvai--hviske-v5.3/refs/main
+curl http://127.0.0.1:9889/status
 ```
 
-### Device + dtype
+### Menu bar app (optional)
 
-On Apple Silicon (MPS) the pipeline picks dtype based on the model:
+```bash
+cd MenuBarApp && ./build.sh && open build/Memo\ Transcriber.app
+```
 
-- Whisper (`hviske-v3-conversation`, OpenAI Whisper) -> `float32` (Whisper has historical bf16 op-coverage issues on MPS).
-- `hviske-v5.x` -> `bfloat16` (matches the model's training dtype, halves weight memory). Falls back to `float32` if MPS bf16 fails to load.
+A lightweight Swift app that shows pipeline state in the menu bar. Requires Xcode Command Line Tools. Targets macOS 14+.
 
-On 16 GB Macs, `hviske-v5.3` at bf16 fits comfortably; at fp32 it spills heavily into swap.
+### Logs
+
+```bash
+tail -f ~/LocalMemoTranscriber/logs/runtime.log
+tail -f ~/LocalMemoTranscriber/logs/error.log
+```
+
+## launchd
+
+The launchd agent runs `start_services.sh`, which starts both the daemon and the upload server. If either dies, launchd restarts the whole thing.
+
+```bash
+# Status
+launchctl print "gui/$(id -u)/local.memo-transcriber"
+
+# Restart
+launchctl kickstart -k "gui/$(id -u)/local.memo-transcriber"
+
+# Reload plist
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/local.memo-transcriber.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.memo-transcriber.plist
+```
+
+### Full Disk Access (optional)
+
+Only needed if watching an iCloud Drive folder. Compile and use the included launcher binary:
+
+```bash
+cc -o launchd/memo-transcriber-launcher launchd/launcher.c
+```
+
+Grant Full Disk Access to `launchd/memo-transcriber-launcher` in System Settings > Privacy and Security.
+
+## Output format
+
+Input: `Møde om praktikpladser.m4a`
+
+Output:
+```
+2026-06-25_1337_mde-om-praktikpladser.m4a   (in done/)
+2026-06-25_1337_mde-om-praktikpladser.txt   (in transcripts/)
+2026-06-25_1337_mde-om-praktikpladser.json
+2026-06-25_1337_mde-om-praktikpladser.srt
+```
+
+Basename conflicts get `-2`, `-3`, ... suffixes.
+
+## Crash recovery
+
+- **flock** for single-instance enforcement (auto-released by kernel on process death - no stale locks)
+- **processing/ directory**: files being transcribed move here. On startup, anything left in `processing/` moves back to `inbox`
+- **3x retry** with exponential backoff (60s, 120s, 300s). After 3 failures, file moves to `failed/`
+- **launchd KeepAlive**: restarts services if either process dies
 
 ## Manual commands
 
 Dry-run config and ffmpeg checks:
 
 ```bash
-~/LocalMemoTranscriber/venv/bin/python ~/LocalMemoTranscriber/transcribe_hviske.py \
+~/LocalMemoTranscriber/venv/bin/python ~/projects/local-memo-transcriber/transcribe_hviske.py \
   --config ~/LocalMemoTranscriber/config.env \
   --dry-run
 ```
 
-Run one polling pass:
+Run one daemon scan:
 
 ```bash
-~/LocalMemoTranscriber/watch_and_transcribe.sh \
+~/LocalMemoTranscriber/venv/bin/python ~/projects/local-memo-transcriber/daemon.py \
   --config ~/LocalMemoTranscriber/config.env \
   --once
 ```
@@ -166,98 +249,34 @@ Run one polling pass:
 Process one file directly:
 
 ```bash
-~/LocalMemoTranscriber/venv/bin/python ~/LocalMemoTranscriber/transcribe_hviske.py \
+~/LocalMemoTranscriber/venv/bin/python ~/projects/local-memo-transcriber/transcribe_hviske.py \
   --config ~/LocalMemoTranscriber/config.env \
   --input ~/LocalMemoTranscriber/inbox/example.m4a
 ```
 
-## launchd
-
-The installer renders a plist at:
-
-```text
-~/Library/LaunchAgents/local.memo-transcriber.plist
-```
-
-Useful commands:
+Clean repetitions from existing transcripts:
 
 ```bash
-launchctl print "gui/$(id -u)/local.memo-transcriber"
-launchctl kickstart -k "gui/$(id -u)/local.memo-transcriber"
-launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/local.memo-transcriber.plist
-launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/local.memo-transcriber.plist
+~/LocalMemoTranscriber/venv/bin/python ~/projects/local-memo-transcriber/clean_repetitions.py \
+  <basename> --transcripts-dir ~/LocalMemoTranscriber/transcripts
 ```
-
-### Full Disk Access (optional)
-
-If the watcher can't read iCloud Drive files, you can compile and use the included launcher binary so macOS Full Disk Access can be granted to a dedicated binary rather than `/bin/bash`:
-
-```bash
-cc -o launchd/memo-transcriber-launcher launchd/launcher.c
-```
-
-Then grant Full Disk Access to `launchd/memo-transcriber-launcher` in System Settings > Privacy & Security.
-
-## Output format
-
-Input: `Ideer til workshop.m4a`
-
-Output:
-
-```text
-2026-03-14_0935_ideer-til-workshop.m4a   (in done/)
-2026-03-14_0935_ideer-til-workshop.txt   (in transcripts/)
-2026-03-14_0935_ideer-til-workshop.json
-2026-03-14_0935_ideer-til-workshop.srt
-```
-
-Basename conflicts get `-2`, `-3`, ... suffixes.
-
-## Monitoring
-
-Two GUI options are available to monitor the pipeline. Both read from `status.json`, which the watcher and transcriber update in real time.
-
-### Menu bar app (native macOS)
-
-A lightweight Swift app that lives in your menu bar. Shows a status icon that changes based on pipeline state, with a popover for progress, queue, history, and quick folder access.
-
-Build and run:
-
-```bash
-cd MenuBarApp && ./build.sh && open build/Memo\ Transcriber.app
-```
-
-Requires Xcode Command Line Tools (`xcode-select --install`). The app targets macOS 14+ (Sonoma).
-
-### Web dashboard
-
-A browser-based dashboard with detailed stats, processing progress, system config, and live runtime logs.
-
-```bash
-~/LocalMemoTranscriber/venv/bin/python ~/LocalMemoTranscriber/dashboard.py \
-  --config ~/LocalMemoTranscriber/config.env
-```
-
-Opens at `http://127.0.0.1:9888` by default. Use `--port` to change the port, or `--no-open` to skip opening the browser. Auto-refreshes every 2 seconds with zero external dependencies.
-
-## Logs
-
-```bash
-tail -f ~/LocalMemoTranscriber/logs/runtime.log
-tail -f ~/LocalMemoTranscriber/logs/error.log
-```
-
-## License
-
-MIT License -- see [LICENSE](LICENSE).
-
-This project invokes `ffmpeg` (GPL-2.0+) as a subprocess; it does not link against or bundle ffmpeg. All Python dependencies use permissive licenses (Apache-2.0 or BSD-3-Clause).
 
 ## Known limitations
 
-- Subtitle timestamps are derived from chunk boundaries and generated text, not Whisper timestamp tokens, because timestamp generation degraded quality in local testing.
-- MPS (Apple GPU) may produce unusable output with some models. The pipeline detects this per-chunk and falls back to CPU automatically. Set `DEVICE_PREFERENCE=cpu` to skip MPS entirely.
-- If PyTorch wheels are unavailable for your Python version, install Python 3.13 and rerun with `PYTHON_BIN_OVERRIDE`.
+- Subtitle timestamps are approximate (derived from chunk boundaries, not model timestamp tokens)
+- MPS (Apple GPU) may produce unusable output with some models - pipeline detects this and falls back to CPU
+- Greedy decoding in cohere_asr can cause repetition loops during silence - cleaned post-hoc by `clean_repetitions.py`
+- If PyTorch wheels are unavailable for your Python version, install Python 3.13 and rerun with `PYTHON_BIN_OVERRIDE`
+
+## Versioning
+
+This project uses [Semantic Versioning](https://semver.org/). See the [changelog](CHANGELOG.md) for release history.
+
+## License
+
+MIT License - see [LICENSE](LICENSE).
+
+This project invokes `ffmpeg` (GPL-2.0+) as a subprocess; it does not link against or bundle ffmpeg. All Python dependencies use permissive licenses (Apache-2.0 or BSD-3-Clause).
 
 ## Contributing
 
