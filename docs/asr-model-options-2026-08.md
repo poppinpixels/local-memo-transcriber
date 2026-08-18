@@ -1,7 +1,7 @@
 # Dansk møde-ASR - muligheder efter Hviske v5.3
 
-**Undersøgt:** 2026-08-19  
-**Miljø:** Apple M4 Mac mini, 16 GB RAM, PyTorch 2.10.0, Transformers 4.57.6, MPS aktivt.  
+**Undersøgt:** 2026-08-19
+**Miljø:** Apple M4 Mac mini, 16 GB RAM, PyTorch 2.10.0, Transformers 4.57.6, MPS aktivt.
 **Formål:** Lange danske møder med følsomt indhold behandles lokalt som udgangspunkt.
 
 ## Kort konklusion
