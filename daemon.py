@@ -88,6 +88,17 @@ class DaemonConfig:
         self.status_script = self.transcribe_script.parent / "status.py"
         self.status_file = path_value("STATUS_FILE", str(Path.home() / "LocalMemoTranscriber" / "status.json"))
 
+        # Optional local Obsidian source-bank integration. Disabled unless the
+        # runtime config explicitly names Morten's vault and routing rules.
+        self.obsidian_ingest_enabled = get("OBSIDIAN_INGEST_ENABLED", "false").lower() == "true"
+        self.obsidian_vault_dir = path_value("OBSIDIAN_VAULT_DIR", str(Path.home() / "Obsidian" / "SecondBrain"))
+        self.obsidian_transcripts_dir = path_value(
+            "OBSIDIAN_TRANSCRIPTS_DIR", str(self.obsidian_vault_dir / "raw" / "transcriptions")
+        )
+        self.obsidian_links_file = path_value(
+            "OBSIDIAN_LINKS_FILE", str(Path.home() / "LocalMemoTranscriber" / "transcript-links.json")
+        )
+
         self.poll_interval = get_int("POLL_INTERVAL_SECONDS", 10)
         self.max_retries = get_int("MAX_RETRIES", 3)
         self.retry_backoff_base = get_float("RETRY_BACKOFF_BASE", 60.0)
@@ -180,6 +191,40 @@ def is_supported_audio(path: Path, config: DaemonConfig) -> bool:
     return path.suffix.lower() in config.supported_extensions
 
 
+def ingest_completed_transcript(
+    config: Any,
+    *,
+    basename: str,
+    original_name: str,
+    done_audio: Path,
+) -> Path | None:
+    """Copy a cleaned transcript into Obsidian without re-running ASR."""
+    if not config.obsidian_ingest_enabled:
+        return None
+
+    transcript_path = config.transcripts_dir / f"{basename}.txt"
+    if not transcript_path.is_file():
+        raise FileNotFoundError(f"Missing transcript output: {transcript_path}")
+
+    rules: list[dict[str, Any]] = []
+    if config.obsidian_links_file.is_file():
+        payload = json.loads(config.obsidian_links_file.read_text(encoding="utf-8"))
+        rules = payload.get("rules", payload) if isinstance(payload, dict) else payload
+        if not isinstance(rules, list):
+            raise ValueError("OBSIDIAN_LINKS_FILE must contain a list or an object with a rules list")
+
+    from obsidian_ingest import ingest_transcript
+
+    return ingest_transcript(
+        transcript_path=transcript_path,
+        output_dir=config.obsidian_transcripts_dir,
+        original_name=original_name,
+        source_audio=done_audio,
+        vault_root=config.obsidian_vault_dir,
+        rules=rules,
+    )
+
+
 def count_queue(config: DaemonConfig) -> int:
     try:
         return sum(1 for f in config.watch_dir.iterdir()
@@ -234,26 +279,47 @@ def process_single_file(config: DaemonConfig, file_path: Path) -> bool:
     )
 
     if result.returncode == 0:
-        # Post-process: clean ASR repetition loops from transcript files
+        # The transcriber logs: "Finished transcription for <basename>.m4a; outputs: {...}"
+        import re as _re
+        basename_match = _re.search(
+            r"Finished transcription for (.+?)\.(?:m4a|mp3|wav|mp4|aac)",
+            result.stdout,
+        )
+        basename = basename_match.group(1) if basename_match else None
+
+        # Post-process: clean ASR repetition loops from transcript files.
         clean_script = config.transcribe_script.parent / "clean_repetitions.py"
-        if clean_script.exists():
-            # Find the basename from the transcriber's stdout
-            # The transcriber logs: "Finished transcription for <basename>.m4a; outputs: {...}"
-            import re as _re
-            basename_match = _re.search(r"Finished transcription for (.+?)\.(?:m4a|mp3|wav|mp4|aac)", result.stdout)
-            if basename_match:
-                basename = basename_match.group(1)
-                clean_result = subprocess.run(
-                    [str(config.venv_python), str(clean_script), basename,
-                     "--transcripts-dir", str(config.transcripts_dir)],
-                    capture_output=True, text=True, timeout=30,
+        if clean_script.exists() and basename:
+            clean_result = subprocess.run(
+                [str(config.venv_python), str(clean_script), basename,
+                 "--transcripts-dir", str(config.transcripts_dir)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if clean_result.returncode == 0 and clean_result.stdout.strip():
+                log(config, f"Cleaned repetitions: {clean_result.stdout.strip().replace(chr(10), ', ')}")
+
+        obsidian_note: Path | None = None
+        if basename:
+            try:
+                obsidian_note = ingest_completed_transcript(
+                    config,
+                    basename=basename,
+                    original_name=file_path.name,
+                    done_audio=config.done_dir / f"{basename}{file_path.suffix}",
                 )
-                if clean_result.returncode == 0 and clean_result.stdout.strip():
-                    log(config, f"Cleaned repetitions: {clean_result.stdout.strip().replace(chr(10), ', ')}")
+                if obsidian_note:
+                    log(config, f"Saved transcript in Obsidian: {obsidian_note}")
+            except Exception as exc:
+                # ASR output remains safely available locally; do not rerun a
+                # costly transcription because only the vault copy failed.
+                log_error(config, f"Obsidian ingest failed for {file_path.name}: {exc}")
 
         log(config, f"Completed: {file_path.name}")
         if config.notify_on_success:
-            notify(config, "Transcription ready", file_path.name)
+            notification_message = file_path.name
+            if obsidian_note:
+                notification_message += " — gemt i Obsidian"
+            notify(config, "Transcription ready", notification_message)
         return True
     else:
         stderr = result.stderr.strip().split("\n")[-1] if result.stderr else "unknown error"

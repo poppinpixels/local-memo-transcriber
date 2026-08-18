@@ -3,6 +3,19 @@
 All notable changes to this project are documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Obsidian source-bank archive:** After repetition cleaning, the daemon can copy each completed transcript to `raw/transcriptions/` as an immutable Markdown source note.
+- **Local rule routing:** `transcript-links.json` matches filename and transcript-text fragments, adds tags and only emits wikilinks to verified existing vault notes. It uses no LLM or network call.
+- **Failure isolation:** A vault-copy failure is logged without re-running an expensive ASR job; the local transcript remains available for recovery.
+
+### Changed
+
+- **Completion notification:** States when the completed transcript was saved in Obsidian.
+- **Configuration and README:** Document the opt-in runtime paths and rule-file template.
+
 ## [1.0.0] - 2026-06-25
 
 ### Added

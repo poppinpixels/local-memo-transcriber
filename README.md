@@ -14,6 +14,8 @@ iPhone Voice Memo
   -> hviske-v5.3 transcribes each chunk on Apple Silicon (MPS/bf16)
   -> Repetition cleaner collapses ASR loops
   -> Outputs .txt, .json, .srt to transcripts/
+  -> Optional local rules copy the cleaned transcript to Obsidian raw/transcriptions/
+     and add verified wikilinks to relevant existing notes (no LLM or network call)
   -> Original audio moves to done/ (or failed/ on error)
   -> macOS notification fires on completion or permanent failure
 ```
@@ -93,6 +95,17 @@ NOTIFY_ON_FAILURE=true
 ```
 
 See `config.env.example` for the full list with explanations.
+
+### Optional Obsidian source-bank archive
+
+To archive each completed, cleaned transcript in an Obsidian vault, copy the rule template and enable the integration in the runtime configuration:
+
+```bash
+cp transcript-links.example.json ~/LocalMemoTranscriber/transcript-links.json
+# Then set OBSIDIAN_INGEST_ENABLED=true in ~/LocalMemoTranscriber/config.env
+```
+
+Each matching rule may use filename fragments and transcript-text fragments, tags, and paths to existing Markdown notes in the vault. The archive only writes a source note under `raw/transcriptions/`; it never modifies wiki pages. Rules are evaluated locally — no LLM or network call is made. A transcript with no verified match is still archived and marked `links_status: needs-linking`.
 
 ## File delivery
 

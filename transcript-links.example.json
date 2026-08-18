@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "notes": "Rules use local filename/transcript matching only; they make no LLM or network calls.",
+  "rules": [
+    {
+      "id": "ciu-bibeskaeftigelse",
+      "filename_patterns": [
+        "møde m søren ciu",
+        "møde med søren ciu",
+        "moede m soeren ciu",
+        "moede med soeren ciu"
+      ],
+      "tags": ["ciu", "bibeskæftigelse", "habilitet", "ai-governance"],
+      "links": [
+        "wiki/CIU — Bibeskæftigelse (chefmøde 2026-08-18).md",
+        "wiki/Dømmekraftskæden — mødeforklaring.md",
+        "wiki/Dømmekraftskæden.md",
+        "System/dashboards/MOC — AI-Strategi.md"
+      ]
+    },
+    {
+      "id": "soroe-moedet",
+      "filename_patterns": ["sorø workshop", "soroe workshop"],
+      "transcript_patterns": ["strakspakken", "sorø-mødet", "sorø mødet", "soroe mødet"],
+      "tags": ["sorø-mødet", "ai-uddannelsespolitik", "strakspakke"],
+      "links": [
+        "wiki/Kilde — Heunicke-interviewet om strakspakken (Berlingske 2026).md",
+        "wiki/Artikel — Sykofanti er en indstilling, ikke et vilkår.md",
+        "System/dashboards/MOC — AI-Strategi.md"
+      ]
+    }
+  ]
+}
