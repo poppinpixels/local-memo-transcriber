@@ -10,6 +10,10 @@
 
 Den nuværende pipeline bruger v5.3's højniveau-`transcribe()`-hjælper med greedy decoding. Modelkortet dokumenterer, at den normale `generate()`-vej med `num_beams=5` reducerer gennemsnitlig WER med 0,4 procentpoint, mod ca. 75 % længere køretid. Det er den første A/B-test værd - før et modelskifte.
 
+SyvAI's oprindelige **Hviske v5** er et 2B-checkpoint med bredere træningsdata, men kortet mærker det nu som bevaret til reproducerbarhed og peger direkte på v5.3 som den anbefalede efterfølger. Dets score er beregnet på 200 eksempler pr. datasæt, så den kan ikke sammenlignes direkte med v5.3's fulde CoRal-test.
+
+Den nye **Hviske v5 tiny** er derimod en reel ny mulighed: 263M parametre, destilleret fra syv-transcribe-ensemblen. Den er målrettet kort lyd, har ingen tidsstempler eller diarisering og skal derfor vurderes som et hurtigt, billigt kladdespor - ikke som en dokumenteret erstatning for lange møder.
+
 ## Baseline
 
 | Optagelse | Lydlængde | Nuværende behandlingstid | Estimat med beam=5 |
@@ -24,6 +28,8 @@ De to færdige tekster har stadig enkelte korte repetitionsmønstre efter den nu
 | Kandidat | Evidens for dansk mødetale | Praktisk vurdering på M4/16 GB | Anbefaling |
 |---|---|---|---|
 | **Hviske v5.3 med beam=5** | v5.3-kortet angiver 11,35 % CER på CoRal v3 conversation mod 11,56 % ved greedy decoding. | Samme model og pipelinegrundlag. Langsommere, men de målte møder vil fortsat blive færdige på under 25 minutter. | **Første test.** |
+| **Hviske v5** | V5-kortet viser bred træning og 17,1 % WER på et 200-eksemplers CoRal-samtaleudsnit, men anbefaler selv v5.3 som den nyere model. | Samme 2B-klasse og ca. 4,13 GB download som v5.3. | Kun som kontrol på de samme klip, hvis den brede træning viser sig at passe bedre til dine møder. |
+| **Hviske v5 tiny** | 263M-parametre destillat. Kortet viser bl.a. 7,15 % WER på FTSpeech, men 26,07 % WER på CoRal conversation. Målet er fart og lille footprint, ikke ensartet mødekvalitet. | MLX int4 er 179 MB og angives til 87× realtid på en base-M4. Maks. 35-sekunders klip, ingen tidsstempler eller diarisering. | Bedst som hurtig lokal kladde eller mobil/laptop-spor - ikke default for lange møder. |
 | **CoRal Røst v3 Whisper 1.5B** | 11,6 % CER på samme CoRal conversation-test. Trænet på dansk samtale- og oplæsningsdata. | 3,09 GB download. Standard Transformers Whisper-model, så den er en renere integrationskandidat end et nyt NeMo- eller vLLM-stack. | **Eneste reelle lokale modeludfordrer.** Test på identiske klip. |
 | **NVIDIA Canary 1B v2** | Understøtter dansk, punktuation, ord- og segmenttidsstempler. | 6,36 GB download og kræver NeMo; dokumentationen er NVIDIA-GPU/CUDA-orienteret. Ingen direkte Apple MPS-vej er dokumenteret. | Ikke prioritet på denne Mac. |
 | **NVIDIA Parakeet RNNT 110M dansk** | 10,7 % WER på CoRal Test i NVIDIA-kortet, men trænings- og evalueringsbeskrivelsen er domineret af oplæst tale. | Kun 0,45 GB, men NeMo og NVIDIA-accelereret deployment. Ingen dokumenteret MPS-vej. | Kun hvis hastighed er vigtigere end mødekvalitet. |
@@ -38,13 +44,16 @@ Hviske v5.3 er udgivet under **CC BY-NC 4.0**. Det er derfor ikke en sikker stan
 
 1. Udvælg tre 5-minutters klip med forskellig sværhedsgrad: rolig én-til-én-samtale, flere stemmer/støj og fagsprog/navne.
 2. Behold v5.3-greedy som kontrol og transskriber de samme klip med v5.3 `generate()` + `num_beams=5`.
-3. Kør de samme klip med Røst v3 Whisper.
-4. Vurder ordfejl, navne/fagsprog, hallucinationer/repetitioner, afsnit/tidsstempler og reel behandlingstid. Brug lyd som facit på udvalgte passager - ikke en LLM som dommer.
-5. Tilføj først diarisation som et separat trin. Diarisation løser "hvem sagde hvad", ikke ordfejl.
-6. Send ikke chef-, CIU- eller kundemøder til en cloududbyder under testen. Brug et optagelsesklip, du eksplicit kan sende ud af huset, hvis cloudsporet skal måles.
+3. Kør de samme klip med Hviske v5 og Røst v3 Whisper. Test ikke en fuld lang optagelse, før ét af dem faktisk vinder på de valgte passager.
+4. Kør Hviske v5 tiny på klippenes 30-sekunders segmenter i MLX int4. Mål især fart, transskriptionsfejl og hvor godt segmenterne kan sættes sammen; sammenlign ikke dets FTSpeech-score med mødekvalitet.
+5. Vurder ordfejl, navne/fagsprog, hallucinationer/repetitioner, afsnit/tidsstempler og reel behandlingstid. Brug lyd som facit på udvalgte passager - ikke en LLM som dommer.
+6. Tilføj først diarisering som et separat trin. Diarisering løser "hvem sagde hvad", ikke ordfejl.
+7. Send ikke chef-, CIU- eller kundemøder til en cloududbyder under testen. Brug et optagelsesklip, du eksplicit kan sende ud af huset, hvis cloudsporet skal måles.
 
 ## Kilder
 
+- [SyvAI - Hviske v5 modelkort](https://huggingface.co/syvai/hviske-v5)
+- [SyvAI - Hviske v5 tiny modelkort](https://huggingface.co/syvai/hviske-v5-tiny)
 - [SyvAI - Hviske v5.3 modelkort](https://huggingface.co/syvai/hviske-v5.3)
 - [CoRal - Røst v3 Whisper 1.5B modelkort](https://huggingface.co/CoRal-project/roest-v3-whisper-1.5b)
 - [NVIDIA - Parakeet RNNT 110M dansk modelkort](https://huggingface.co/nvidia/parakeet-rnnt-110m-da-dk)
